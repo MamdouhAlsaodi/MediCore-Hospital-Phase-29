@@ -46,20 +46,24 @@ cd backend
 MEDICORE_DEMO_SEED=true HOSPITAL_ADMIN_PASSWORD="$HOSPITAL_ADMIN_PASSWORD" HOSPITAL_JWT_SECRET="$HOSPITAL_JWT_SECRET" mvn spring-boot:run
 ```
 
-What gets created (all values are obviously synthetic; no real personal, clinical, or financial data; Training/Portfolio use only):
+What gets created (all values are obviously synthetic, on the `synthetic.test` demo domain, with `Demo`/`DEMO` names throughout; no real personal, clinical, or financial data; Training/Portfolio use only):
 
-- 3 patients: `Demo Patient Alpha` (`DEMO-0001`), `Demo Patient Bravo` (`DEMO-0002`), `Demo Patient Charlie` (`DEMO-0003`)
-- 2 professionals: `Demo Physician Alpha` (`DEMO-STAFF-001`, internal medicine), `Demo Nurse Bravo` (`DEMO-STAFF-002`, nursing)
-- 2 appointments linking them: Alpha ↔ Physician (consultation, scheduled) and Bravo ↔ Nurse (follow-up, confirmed)
-- 2 admissions: Alpha `ADMITTED` (open) and Bravo `DISCHARGED`, with generic demo workflow labels as reasons
-- 3 emergency visits: Charlie `WAITING`, Alpha `IN_TREATMENT`, Bravo `CLOSED`, with generic demo complaint labels and the meaningless demo triage labels `2`–`4` (triage here is never a clinical assessment)
-- 4 invoices (`DEMO-INV-0001`–`DEMO-INV-0004`), exactly one in each state `DRAFT`, `ISSUED`, `PAID`, `VOID` — amounts and currency labels are display-only financial simulation data with no payment semantics
+- 1 synthetic organization: `Demo Synthetic Hospital` (`DEMO-ORG-001`)
+- 3 unmistakably synthetic branches of varied size, all active: `Demo Main Branch` (`DEMO-BR-001`, the deterministic default), `Demo North Branch` (`DEMO-BR-002`), `Demo Harbor Branch` (`DEMO-BR-003`)
+- 4 branch-owned departments: `DEMO-DEP-0001`/`DEMO-DEP-0002` on the main branch, `DEMO-DEP-0101` on north, `DEMO-DEP-0201` on harbor
+- 6 branch-owned patients: `Demo Patient Alpha`–`Demo Patient Foxtrot` (`DEMO-0001`–`DEMO-0006`; 3 main, 2 north, 1 harbor), emails on `@synthetic.test`
+- 5 branch-owned professionals: `DEMO-STAFF-001`/`DEMO-STAFF-002` (main), `DEMO-STAFF-0101`/`DEMO-STAFF-0102` (north), `DEMO-STAFF-0201` (harbor), each naming a same-branch department
+- 5 dated half-open availability intervals (2031 dates) for those professionals, and 4 appointments — every appointment window sits inside its own professional's same-branch availability
+- 8 branch-owned beds covering all four operational statuses: main 4 (1 `AVAILABLE`, 1 `OCCUPIED`, 1 `MAINTENANCE`, 1 `OUT_OF_SERVICE`), north 2 (1+1), harbor 2 (`AVAILABLE`), keyed per (branch, ward, room, bedNumber)
+- 4 branch-owned admissions: Alpha (main) and Delta (north) `ADMITTED` and each genuinely occupying a bed through a live assignment row; Bravo (main) and Foxtrot (harbor) `DISCHARGED` with no bed
+- 5 branch-owned emergency visits: 2 `WAITING` (Charlie main, Echo north), 1 `IN_TREATMENT` (Alpha main), 2 `CLOSED` (Bravo main, Foxtrot harbor), with generic demo complaint labels and the meaningless demo triage labels `1`–`5` (triage here is never a clinical assessment)
+- 7 simulated invoices (`DEMO-INV-0101`–`0104` main, `0201`/`0202` north, `0301` harbor): 2 `DRAFT`, 2 `ISSUED`, 2 `PAID`, 1 `VOID` — amounts and currency labels are display-only financial simulation data with no payment semantics
 
-Expected review evidence after startup: the Dashboard shows `patients=3`, `appointments=2`, `admissions=2`, `emergencyVisits=3`, `invoices=4`, `openAdmissions=1` (the DISCHARGED row is excluded), `activeEmergencyVisits=2` (WAITING + IN_TREATMENT; CLOSED is excluded), and exactly `1` in each `invoicesDraft`/`invoicesIssued`/`invoicesPaid`/`invoicesVoid` bucket.
+Expected review evidence after startup: log in as the organization `admin` and open the network command center (`/api/dashboard/network`) — it compares all three branch summaries in code order, totals equal the per-branch sums, and every status bucket is populated (4/2/1/1 beds, 2/2/2/1 invoices). A branch-scoped ADMIN context sees the same shape for one branch through `/api/dashboard/branch`; the default branch holds nonzero fixtures in every status bucket. The demo fixtures are dated 2031, so today's-appointment counts honestly stay zero.
 
-Seeding is idempotent and safe to restart: every insert is lookup-before-create (patient MRN, professional employee code, appointment key, admission patient+time+reason key, emergency patient+arrival+complaint key, unique invoice number), so restarting never duplicates rows, and it never deletes or modifies existing records. Every newly created record is recorded as a CREATE audit event attributed to the `system` actor (no user is authenticated at startup), so the ADMIN Audit screen shows the full seeded journey; reused records add no events, which keeps restarts idempotent in the audit trail too. No accounts or credentials are created.
+Seeding is idempotent and safe to restart: every insert is lookup-before-create against a stable business key (organization code; (organization, code) branch pair; (branch, code) department pair; bed (branch, ward, room, bedNumber); patient MRN; professional employee code; appointment patient+professional+time+type; availability branch+professional+window; admission patient+time+reason; emergency patient+arrival+complaint; unique invoice number), so restarting never duplicates rows, and it never deletes or modifies existing records. The bed-assignment action is idempotent through the live assignment row, so an interrupted startup self-heals instead of leaving a bed/admission contradiction. Unknown pre-existing rows (for example null-branch departments from older data) are never mass-updated, reassigned, or adopted. Every newly created record is recorded as an audit event attributed to the `system` actor (no user is authenticated at startup), carrying the owning branch as its only acting-context value and no correlation id; reused records add no events, which keeps restarts idempotent in the audit trail too. A full first run records exactly 54 events: 52 CREATE events (one per created row) plus the 2 admission bed-assignment actions recorded as `UPDATE Admission` with a `bed: <id>` detail, matching `AdmissionService`. A branch-scoped ADMIN sees its branch's seeding events; an organization-scoped ADMIN sees the full run through the `legacy/unassigned` slice (no acting assignment exists at startup). No accounts or credentials are created.
 
-Verify by logging in as an ADMIN and checking Patients (search `DEMO-`), Appointments, Admissions, Emergency visits, Invoices, the Dashboard totals above, and the Audit screen (CREATE events with actor `system`, one per newly created seeded record — sixteen in total for the full cohort: 3 patients + 2 professionals + 2 appointments + 2 admissions + 3 emergency visits + 4 invoices). Never enable demo seeding against a shared or production data store.
+Verify by logging in as an ADMIN and checking Patients (search `DEMO-`), Appointments, Admissions, Emergency visits, Invoices, the branch/network command centers above, and the Audit screen (events with actor `system`, one per newly created seeded record plus the 2 bed-assignment actions — 54 in total for the full first-run cohort: 1 organization + 3 branches + 4 departments + 6 patients + 5 professionals + 4 appointments + 5 availability intervals + 8 beds + 4 admissions + 5 emergency visits + 7 invoices, plus 2 assignment actions). Never enable demo seeding against a shared or production data store.
 
 ## Review accounts (opt-in, disabled by default)
 
@@ -86,12 +90,13 @@ Behavior and boundaries:
 Run the full test gates from the repository root:
 
 ```bash
-cd backend && mvn test                        # 70 tests (CareOperationsApiTest 20,
-                                              # PatientJourneyApiTest 19,
-                                              # SecurityAuthorizationTest 14,
-                                              # DemoDataInitializerTest 8,
-                                              # DevAdminInitializerTest 6,
-                                              # DashboardApiTest 2,
+cd backend && mvn test                        # 162 tests (MultiBranchOperationsApiTest 43,
+                                              # SecurityAuthorizationTest 38,
+                                              # PatientJourneyApiTest 24,
+                                              # CareOperationsApiTest 23,
+                                              # DemoDataInitializerTest 13,
+                                              # DevAdminInitializerTest 13,
+                                              # DashboardApiTest 7,
                                               # ArchitectureSmokeTest 1)
 cd ../frontend && npm test && npm run build   # 125 tests across 12 files + production build
 cd .. && git diff --check                     # whitespace/conflict-marker gate
