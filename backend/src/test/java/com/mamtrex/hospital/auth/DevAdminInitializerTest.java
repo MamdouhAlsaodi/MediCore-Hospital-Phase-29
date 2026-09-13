@@ -369,4 +369,47 @@ class DevAdminInitializerTest {
         verify(accounts, never()).findByUsername("nurse");
         verify(assignments, times(1)).save(any(ActingAssignment.class));
     }
+
+    /**
+     * Task 12 (docs/plan3.md): with the expanded three-branch demo
+     * hierarchy present, provisioning stays deterministic — the review
+     * accounts bind to the first active branch in code order
+     * ({@code DEMO-BR-001}), never to a later branch, and every bootstrap
+     * assignment is created enabled.
+     */
+    @Test
+    void provisioningWithThreeBranchesStaysDeterministicallyBoundToTheFirstByCodeBranch() throws Exception {
+        UserAccountRepository accounts = mock(UserAccountRepository.class);
+        ActingAssignmentRepository assignments = mock(ActingAssignmentRepository.class);
+        HospitalOrganizationRepository organizations = mock(HospitalOrganizationRepository.class);
+        BranchRepository branches = mock(BranchRepository.class);
+        HospitalOrganization organization = new HospitalOrganization("DEMO-ORG-001", "Demo Synthetic Hospital");
+        Branch main = new Branch(organization, "DEMO-BR-001", "Demo Main Branch", "1 Demo Campus");
+        Branch north = new Branch(organization, "DEMO-BR-002", "Demo North Branch", "9 Demo North Road");
+        Branch harbor = new Branch(organization, "DEMO-BR-003", "Demo Harbor Branch", "17 Demo Harbor Lane");
+        when(accounts.findByUsername("doctor")).thenReturn(Optional.of(
+                new UserAccount("doctor", "pre-existing-doctor-hash", Set.of(Role.DOCTOR))));
+        when(accounts.findByUsername("nurse")).thenReturn(Optional.of(
+                new UserAccount("nurse", "pre-existing-nurse-hash", Set.of(Role.NURSE))));
+        when(organizations.findAll(any(Sort.class))).thenReturn(List.of(organization));
+        when(branches.findByOrganizationIdAndActiveTrueOrderByCodeAsc(organization.getId()))
+                .thenReturn(List.of(main, north, harbor));
+        when(assignments.findByAccountIdAndRoleAndScopeAndBranchId(any(), any(), any(), any()))
+                .thenReturn(Optional.empty());
+        when(assignments.save(any(ActingAssignment.class)))
+                .thenAnswer(invocation -> invocation.getArgument(0, ActingAssignment.class));
+
+        runProvisioning(accounts, assignments, organizations, branches, true);
+
+        ArgumentCaptor<ActingAssignment> saved = ArgumentCaptor.forClass(ActingAssignment.class);
+        verify(assignments, times(2)).save(saved.capture());
+        for (ActingAssignment assignment : saved.getAllValues()) {
+            assertEquals(AssignmentScope.BRANCH, assignment.getScope());
+            assertTrue(assignment.isEnabled(), "bootstrap assignments are created enabled");
+            assertEquals(main, assignment.getBranch(),
+                    "with three branches the deterministic default branch stays the first in code order");
+            assertEquals(organization, assignment.getOrganization());
+            assertNull(assignment.getDepartment());
+        }
+    }
 }

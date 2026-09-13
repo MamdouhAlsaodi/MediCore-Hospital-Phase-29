@@ -45,9 +45,14 @@ import java.util.Set;
  * {@link ApplicationReadyEvent} listener bean, which Spring fires strictly
  * after every {@code Runner}, so the opt-in demo hierarchy deterministically
  * exists before provisioning when both are enabled, without modifying the
- * demo initializer. With no organization or no active branch, nothing is
- * fabricated: account creation follows the established contract and login
- * fails closed until hierarchy and assignment provisioning exist.</p>
+ * demo initializer. Since the Task 12 three-branch cohort, the
+ * deterministic default branch is still the first active branch in code
+ * order of the organization ({@code DEMO-BR-001}), so the expanded
+ * hierarchy changes nothing about where the bootstrap assignments bind;
+ * they are created enabled and never touched again. With no organization or
+ * no active branch, nothing is fabricated: account creation follows the
+ * established contract and login fails closed until hierarchy and
+ * assignment provisioning exist.</p>
  */
 @Configuration
 public class DevAdminInitializer {

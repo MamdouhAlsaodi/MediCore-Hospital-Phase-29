@@ -1,15 +1,21 @@
 package com.mamtrex.hospital.bootstrap;
 
 import com.mamtrex.hospital.admission.Admission;
+import com.mamtrex.hospital.admission.AdmissionBedAssignment;
+import com.mamtrex.hospital.admission.AdmissionBedAssignmentRepository;
 import com.mamtrex.hospital.admission.AdmissionRepository;
 import com.mamtrex.hospital.appointment.Appointment;
 import com.mamtrex.hospital.appointment.AppointmentRepository;
 import com.mamtrex.hospital.audit.AuditEvent;
 import com.mamtrex.hospital.audit.AuditEventRepository;
 import com.mamtrex.hospital.audit.AuditService;
+import com.mamtrex.hospital.auth.ActingAssignment;
+import com.mamtrex.hospital.auth.ActingAssignmentRepository;
 import com.mamtrex.hospital.auth.ActingContext;
 import com.mamtrex.hospital.auth.AssignmentScope;
 import com.mamtrex.hospital.auth.Role;
+import com.mamtrex.hospital.bed.Bed;
+import com.mamtrex.hospital.bed.BedRepository;
 import com.mamtrex.hospital.billing.Invoice;
 import com.mamtrex.hospital.billing.InvoiceRepository;
 import com.mamtrex.hospital.department.Department;
@@ -24,6 +30,8 @@ import com.mamtrex.hospital.patient.Patient;
 import com.mamtrex.hospital.patient.PatientRepository;
 import com.mamtrex.hospital.reporting.DashboardDtos;
 import com.mamtrex.hospital.reporting.DashboardService;
+import com.mamtrex.hospital.staff.StaffAvailability;
+import com.mamtrex.hospital.staff.StaffAvailabilityRepository;
 import com.mamtrex.hospital.staff.StaffMember;
 import com.mamtrex.hospital.staff.StaffMemberRepository;
 import org.junit.jupiter.api.Test;
@@ -45,34 +53,39 @@ import static org.junit.jupiter.api.Assertions.*;
 
 /**
  * Demo seeding contract tests (docs/plan1.md Task 11, docs/plan2.md Task 8,
- * docs/plan3.md Task 2).
+ * docs/plan3.md Tasks 2, 4, and 12).
  *
  * Pins the opt-in bootstrap behavior: the initializer does not exist by
  * default (no flag, no writes), the dedicated {@code medicore.demo.seed}
- * flag produces a coherent, obviously synthetic cohort including the Task 2
- * hierarchy — one stable synthetic organization, one stable default branch,
- * and only the initializer-owned demo departments assigned to that branch —
- * every seeded reference resolves to a seeded record, repeated
- * initialization is idempotent without duplicate inflation or destructive
- * resets, every newly created seeded record produces exactly one CREATE
- * audit event attributed to the system actor (reused records add none),
- * unknown pre-existing null-branch departments stay untouched and
- * unassigned, the seeded workflow cohort (patients, professionals,
- * appointments) is bound at creation time to the stable default branch
- * (docs/plan3.md Task 4), the branch-scoped typed dashboard summary through
- * the real {@link DashboardService} counts the branch-bound cohort exactly
- * while the legacy null-branch care-operation fixtures stay hidden and zero
- * until Task 12's separate cohort work, and the disabled default touches no
- * store and records no event. Runs against an isolated
- * in-memory H2 database (never the production file store) with disposable
- * synthetic test-only secrets; no real personal or clinical data and no
- * hardcoded credentials are involved.
+ * flag produces the coherent three-branch synthetic operations cohort —
+ * one stable synthetic organization, three obviously synthetic branches of
+ * varied size under stable business keys, branch-owned departments and
+ * professionals, dated same-branch availability, beds in every operational
+ * status, same-branch patients, appointments, admissions with live bed
+ * assignments, emergency visits, and simulated invoices — every seeded
+ * reference resolves same-branch, no branch-owned row has null or dangling
+ * ownership, no bed/admission contradiction exists, every newly created
+ * seeded record produces exactly one audit event attributed to the system
+ * actor carrying the owning branch as its only context value (never a
+ * fabricated assignment, role, or organization), the typed branch and
+ * network dashboards count the cohort exactly with nonzero coverage per
+ * branch, repeated initialization inserts zero records and zero events,
+ * and the disabled default touches no store and records no event. The
+ * opt-in review-account bootstrap also pins the enabled acting assignments
+ * of the cohort: ADMIN at ORGANIZATION scope and doctor/nurse at BRANCH
+ * scope on the deterministic first-by-code demo branch. Runs against an
+ * isolated in-memory H2 database (never the production file store) with
+ * disposable synthetic test-only secrets; no real personal or clinical
+ * data and no hardcoded credentials are involved.
  */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT, properties = {
         "spring.datasource.url=jdbc:h2:mem:demo-data-test;MODE=PostgreSQL;DB_CLOSE_DELAY=-1",
         "spring.jpa.hibernate.ddl-auto=create-drop",
         "hospital.jwt.secret=" + DemoDataInitializerTest.TEST_JWT_SECRET,
         "HOSPITAL_ADMIN_PASSWORD=" + DemoDataInitializerTest.TEST_ACCOUNT_PASSWORD,
+        "medicore.review-accounts.enabled=true",
+        "HOSPITAL_REVIEW_DOCTOR_PASSWORD=" + DemoDataInitializerTest.TEST_ACCOUNT_PASSWORD,
+        "HOSPITAL_REVIEW_NURSE_PASSWORD=" + DemoDataInitializerTest.TEST_ACCOUNT_PASSWORD,
         "medicore.demo.seed=true"
 })
 class DemoDataInitializerTest {
@@ -81,29 +94,48 @@ class DemoDataInitializerTest {
     static final String TEST_JWT_SECRET =
             "disposable-test-only-secret-demo-0123456789abcdef0123456789abcdef";
 
-    /** Long disposable test-only value; never a production credential. */
+    /** Long disposable test-only value; never a real credential. */
     static final String TEST_ACCOUNT_PASSWORD = "disposable-test-password-demo-01";
 
-    private static final Set<String> DEMO_MRNS = Set.of("DEMO-0001", "DEMO-0002", "DEMO-0003");
-    private static final Set<String> DEMO_STAFF_CODES = Set.of("DEMO-STAFF-001", "DEMO-STAFF-002");
-
-    /** Task 2 immutable hierarchy business keys; the initializer owns only these rows. */
+    /** Stable demo business keys: one organization, three synthetic branches. */
     private static final String DEMO_ORG_CODE = "DEMO-ORG-001";
     private static final String DEMO_BRANCH_CODE = "DEMO-BR-001";
-    private static final Set<String> DEMO_DEPARTMENT_CODES = Set.of("DEMO-DEP-0001", "DEMO-DEP-0002");
+    private static final String DEMO_BRANCH_NORTH_CODE = "DEMO-BR-002";
+    private static final String DEMO_BRANCH_HARBOR_CODE = "DEMO-BR-003";
+    private static final Set<String> DEMO_BRANCH_CODES =
+            Set.of(DEMO_BRANCH_CODE, DEMO_BRANCH_NORTH_CODE, DEMO_BRANCH_HARBOR_CODE);
 
-    /** Task 8 contract: exactly one invoice per lifecycle status. */
-    private static final Set<String> INVOICE_STATUSES = Set.of("DRAFT", "ISSUED", "PAID", "VOID");
+    /** Branch-owned demo departments keyed per branch. */
+    private static final Set<String> DEMO_DEPARTMENT_CODES =
+            Set.of("DEMO-DEP-0001", "DEMO-DEP-0002", "DEMO-DEP-0101", "DEMO-DEP-0201");
+
+    private static final Set<String> DEMO_MRNS = Set.of(
+            "DEMO-0001", "DEMO-0002", "DEMO-0003", "DEMO-0004", "DEMO-0005", "DEMO-0006");
+    private static final Set<String> DEMO_STAFF_CODES = Set.of(
+            "DEMO-STAFF-001", "DEMO-STAFF-002", "DEMO-STAFF-0101", "DEMO-STAFF-0102", "DEMO-STAFF-0201");
+
+    /** Exact first-run composition of the three-branch cohort (docs/plan3.md Task 12). */
+    private static final long TOTAL_PATIENTS = 6L;
+    private static final long TOTAL_STAFF = 5L;
+    private static final long TOTAL_APPOINTMENTS = 4L;
+    private static final long TOTAL_AVAILABILITY = 5L;
+    private static final long TOTAL_BEDS = 8L;
+    private static final long TOTAL_ADMISSIONS = 4L;
+    private static final long TOTAL_EMERGENCY_VISITS = 5L;
+    private static final long TOTAL_INVOICES = 7L;
+
+    /**
+     * Exact audit ledger of one full first run: one CREATE per newly created
+     * row (1 organization + 3 branches + 4 departments + 6 patients + 5
+     * professionals + 4 appointments + 5 availability intervals + 8 beds + 4
+     * admissions + 5 emergency visits + 7 invoices = 52) plus the two
+     * admission-bed assignment actions recorded with the
+     * {@code AdmissionService} UPDATE convention. A second run adds zero.
+     */
+    private static final long FULL_AUDIT_LEDGER_SIZE = 54L;
 
     /** Meaningless demo triage labels (docs/plan2.md Task 8: never clinical advice). */
     private static final Set<String> DEMO_TRIAGE_LABELS = Set.of("1", "2", "3", "4", "5");
-
-    /**
-     * Total CREATE events of the full fixture: 3 patients + 2 professionals
-     * + 2 appointments + 2 admissions + 3 emergency visits + 4 invoices +
-     * Task 2 hierarchy (1 organization + 1 branch + 2 demo departments).
-     */
-    private static final long FULL_AUDIT_LEDGER_SIZE = 20;
 
     @Autowired
     DemoDataInitializer initializer;
@@ -115,16 +147,25 @@ class DemoDataInitializerTest {
     StaffMemberRepository staff;
 
     @Autowired
+    StaffAvailabilityRepository availability;
+
+    @Autowired
     AppointmentRepository appointments;
 
     @Autowired
     AdmissionRepository admissions;
 
     @Autowired
+    AdmissionBedAssignmentRepository bedAssignments;
+
+    @Autowired
     EmergencyVisitRepository emergencyVisits;
 
     @Autowired
     InvoiceRepository invoices;
+
+    @Autowired
+    BedRepository beds;
 
     @Autowired
     AuditEventRepository auditEvents;
@@ -141,6 +182,13 @@ class DemoDataInitializerTest {
     @Autowired
     DepartmentRepository departments;
 
+    @Autowired
+    ActingAssignmentRepository assignments;
+
+    // ------------------------------------------------------------------
+    // First-run composition.
+    // ------------------------------------------------------------------
+
     /**
      * The flag creates exactly the named synthetic cohort at startup; this
      * test never calls the seeder itself, so a green run proves the runner
@@ -148,119 +196,644 @@ class DemoDataInitializerTest {
      */
     @Test
     void enabledFlagSeedsTheNamedSyntheticCohortAtStartup() {
-        List<Patient> demoPatients = demoPatients();
-        assertEquals(3, demoPatients.size(), "the demo cohort must contain exactly three synthetic patients");
-        assertEquals(DEMO_MRNS, demoPatients.stream()
-                .map(Patient::getMedicalRecordNumber)
-                .collect(Collectors.toSet()), "demo patients must carry the stable DEMO medical record numbers");
-        assertTrue(demoPatients.stream().allMatch(p -> p.getFullName().startsWith("Demo Patient ")),
+        List<Patient> demoPatientRows = demoPatients();
+        assertEquals(TOTAL_PATIENTS, demoPatientRows.size(),
+                "the demo cohort must contain exactly six synthetic patients");
+        assertEquals(DEMO_MRNS, demoPatientRows.stream()
+                        .map(Patient::getMedicalRecordNumber)
+                        .collect(Collectors.toSet()),
+                "demo patients must carry the stable DEMO medical record numbers");
+        assertTrue(demoPatientRows.stream().allMatch(p -> p.getFullName().startsWith("Demo Patient ")),
                 "demo patient names must be obviously synthetic");
-        assertTrue(demoPatients.stream().allMatch(Patient::isActive), "demo patients must be active records");
+        assertTrue(demoPatientRows.stream().allMatch(p -> p.getEmail().endsWith("@synthetic.test")),
+                "demo patient emails must stay on the unmistakable synthetic domain");
 
-        List<StaffMember> demoStaff = demoStaff();
-        assertEquals(2, demoStaff.size(), "the demo cohort must contain exactly two synthetic professionals");
-        assertEquals(DEMO_STAFF_CODES, demoStaff.stream()
-                .map(StaffMember::getEmployeeCode)
-                .collect(Collectors.toSet()), "demo professionals must carry the stable DEMO employee codes");
-        assertTrue(demoStaff.stream().allMatch(s -> s.getFullName().startsWith("Demo ")),
+        List<StaffMember> demoStaffRows = demoStaff();
+        assertEquals(TOTAL_STAFF, demoStaffRows.size(),
+                "the demo cohort must contain exactly five synthetic professionals");
+        assertEquals(DEMO_STAFF_CODES, demoStaffRows.stream()
+                        .map(StaffMember::getEmployeeCode)
+                        .collect(Collectors.toSet()),
+                "demo professionals must carry the stable DEMO employee codes");
+        assertTrue(demoStaffRows.stream().allMatch(s -> s.getFullName().startsWith("Demo ")),
                 "professional names must be obviously synthetic");
 
-        List<Appointment> demoAppointments = appointments.findAll().stream().toList();
-        assertEquals(2, demoAppointments.size(), "the demo cohort must contain exactly two synthetic appointments");
+        assertEquals(TOTAL_APPOINTMENTS, appointments.count(),
+                "the demo cohort must contain exactly four synthetic appointments");
+        assertEquals(TOTAL_AVAILABILITY, availability.count(),
+                "the demo cohort must contain exactly five dated availability intervals");
+        assertEquals(TOTAL_BEDS, beds.count(),
+                "the demo cohort must contain exactly eight synthetic beds");
+        assertEquals(TOTAL_ADMISSIONS, admissions.count(),
+                "the demo cohort must contain exactly four synthetic admissions");
+        assertEquals(TOTAL_EMERGENCY_VISITS, emergencyVisits.count(),
+                "the demo cohort must contain exactly five synthetic emergency visits");
+        assertEquals(TOTAL_INVOICES, invoices.count(),
+                "the demo cohort must contain exactly seven simulated invoices");
     }
 
-    // ------------------------------------------------------------------
-    // Task 2: the hierarchy foundation is part of the demo cohort.
-    // ------------------------------------------------------------------
-
     /**
-     * Task 2: the initializer owns exactly one synthetic organization and
-     * one default branch under immutable business keys, and the branch is
-     * active and bound to that organization.
+     * Task 12 hierarchy: exactly one synthetic organization with exactly
+     * three obviously synthetic branches of varied size, all active, all
+     * bound to that organization under immutable business keys, plus only
+     * the initializer-owned departments distributed across the branches.
      */
     @Test
-    void demoHierarchyIsOneStableSyntheticOrganizationWithOneDefaultBranch() {
+    void threeBranchHierarchyIsSeededUnderStableBusinessKeys() {
         List<HospitalOrganization> orgs = organizations.findAll().stream().toList();
         assertEquals(1, orgs.size(), "the initializer must own exactly one organization");
         assertEquals(DEMO_ORG_CODE, orgs.get(0).getCode(), "the organization code must be the immutable demo key");
         assertTrue(orgs.get(0).getName().startsWith("Demo "), "the organization name must be obviously synthetic");
 
         List<Branch> demoBranches = branches.findAll().stream().toList();
-        assertEquals(1, demoBranches.size(), "the initializer must own exactly one default branch");
-        Branch branch = demoBranches.get(0);
-        assertEquals(DEMO_BRANCH_CODE, branch.getCode(), "the branch code must be the immutable demo key");
-        assertTrue(branch.isActive(), "the default demo branch must be active");
-        assertTrue(branch.getName().startsWith("Demo "), "the branch name must be obviously synthetic");
-        assertFalse(branch.getLocationLabel().isBlank(), "the branch must carry a location label");
-        assertEquals(orgs.get(0).getId(), branch.getOrganization().getId(),
-                "the default branch must belong to the demo organization");
-    }
+        assertEquals(3, demoBranches.size(), "the initializer must own exactly three synthetic branches");
+        assertEquals(DEMO_BRANCH_CODES, demoBranches.stream().map(Branch::getCode).collect(Collectors.toSet()),
+                "the branches must carry exactly the stable DEMO-BR keys");
+        assertTrue(demoBranches.stream().allMatch(Branch::isActive), "every demo branch must be active");
+        assertTrue(demoBranches.stream().allMatch(b -> b.getName().startsWith("Demo ")),
+                "branch names must be obviously synthetic");
+        assertTrue(demoBranches.stream().allMatch(b -> !b.getLocationLabel().isBlank()),
+                "every branch must carry a location label");
+        assertTrue(demoBranches.stream().allMatch(b -> orgs.get(0).getId().equals(b.getOrganization().getId())),
+                "every demo branch must belong to the demo organization");
 
-    /**
-     * Task 2: only initializer-owned demo departments are branch-assigned —
-     * every assigned row carries a DEMO-DEP stable key and resolves to the
-     * demo branch. Unknown pre-existing rows (never seeded here) are
-     * covered by the dedicated preservation test.
-     */
-    @Test
-    void demoDepartmentsAreAssignedOnlyToTheDemoOwnedBranch() {
-        Branch branch = branches.findAll().stream().findFirst().orElseThrow();
-        List<Department> assigned = departments.findAll().stream()
+        // Varied size: the three branches own different numbers of rows.
+        List<Department> ownedDepartments = departments.findAll().stream()
                 .filter(department -> department.getBranch() != null)
                 .toList();
-        assertEquals(2, assigned.size(), "the initializer must own exactly two demo departments");
-        assertEquals(DEMO_DEPARTMENT_CODES, assigned.stream()
+        assertEquals(4, ownedDepartments.size(), "the initializer must own exactly four demo departments");
+        assertEquals(DEMO_DEPARTMENT_CODES, ownedDepartments.stream()
                         .map(Department::getCode).collect(Collectors.toSet()),
-                "assigned departments must carry exactly the stable DEMO-DEP keys");
-        assertTrue(assigned.stream().allMatch(department -> department.getName().startsWith("Demo ")),
+                "owned departments must carry exactly the stable DEMO-DEP keys");
+        Map<String, List<Department>> byBranchCode = ownedDepartments.stream().collect(
+                Collectors.groupingBy(department -> demoBranches.stream()
+                        .filter(b -> b.getId().equals(department.getBranch().getId()))
+                        .findFirst().orElseThrow().getCode()));
+        assertEquals(2, byBranchCode.get(DEMO_BRANCH_CODE).size(),
+                "the default branch must own two departments");
+        assertEquals(1, byBranchCode.get(DEMO_BRANCH_NORTH_CODE).size(),
+                "the north branch must own one department");
+        assertEquals(1, byBranchCode.get(DEMO_BRANCH_HARBOR_CODE).size(),
+                "the harbor branch must own one department");
+        assertTrue(ownedDepartments.stream().allMatch(d -> d.getName().startsWith("Demo ")),
                 "demo department names must be obviously synthetic");
-        assertTrue(assigned.stream().allMatch(department -> branch.getId().equals(department.getBranch().getId())),
-                "every assigned department must resolve to the demo default branch");
+
+        // Varied size extends to the branch-owned workflow cohorts.
+        Map<String, Long> patientsByBranchCode = patientsByBranch();
+        assertEquals(3L, patientsByBranchCode.get(DEMO_BRANCH_CODE), "default branch: three patients");
+        assertEquals(2L, patientsByBranchCode.get(DEMO_BRANCH_NORTH_CODE), "north branch: two patients");
+        assertEquals(1L, patientsByBranchCode.get(DEMO_BRANCH_HARBOR_CODE), "harbor branch: one patient");
+        Map<String, Long> staffByBranchCode = staffByBranch();
+        assertEquals(2L, staffByBranchCode.get(DEMO_BRANCH_CODE), "default branch: two professionals");
+        assertEquals(2L, staffByBranchCode.get(DEMO_BRANCH_NORTH_CODE), "north branch: two professionals");
+        assertEquals(1L, staffByBranchCode.get(DEMO_BRANCH_HARBOR_CODE), "harbor branch: one professional");
+        Map<String, Long> bedsByBranchCode = bedsByBranch();
+        assertEquals(4L, bedsByBranchCode.get(DEMO_BRANCH_CODE), "default branch: four beds");
+        assertEquals(2L, bedsByBranchCode.get(DEMO_BRANCH_NORTH_CODE), "north branch: two beds");
+        assertEquals(2L, bedsByBranchCode.get(DEMO_BRANCH_HARBOR_CODE), "harbor branch: two beds");
+    }
+
+    // ------------------------------------------------------------------
+    // Referential integrity: ownership and same-branch references.
+    // ------------------------------------------------------------------
+
+    /**
+     * Task 12 invariant: no branch-owned demo row has null or dangling
+     * branch ownership, and every seeded reference resolves to a seeded
+     * record of the SAME branch. The three demo branch rows are the only
+     * owners; every workflow, care-operation, bed, and availability row
+     * resolves to one of them.
+     */
+    @Test
+    void everyBranchOwnedDemoRowHasValidSameBranchOwnershipAndReferences() {
+        Map<UUID, String> branchCodeById = branches.findAll().stream()
+                .collect(Collectors.toMap(Branch::getId, Branch::getCode));
+        assertEquals(DEMO_BRANCH_CODES, Set.copyOf(branchCodeById.values()),
+                "the only owners in the isolated demo store are the three demo branches");
+
+        for (Patient patient : patients.findAll()) {
+            assertNotNull(patient.getBranch(), "seeded patient " + patient.getMedicalRecordNumber()
+                    + " must be branch-owned");
+            assertTrue(branchCodeById.containsKey(patient.getBranch().getId()),
+                    "seeded patient ownership must resolve to a demo branch");
+        }
+        for (StaffMember member : demoStaff()) {
+            assertNotNull(member.getBranch(), "seeded professional " + member.getEmployeeCode()
+                    + " must be branch-owned");
+            assertTrue(branchCodeById.containsKey(member.getBranch().getId()),
+                    "seeded professional ownership must resolve to a demo branch");
+            // The free-form department label must name a department of the same branch.
+            assertTrue(departments.findAll().stream().anyMatch(d -> d.getBranch() != null
+                            && d.getBranch().getId().equals(member.getBranch().getId())
+                            && d.getName().equals(member.getDepartment())),
+                    "professional " + member.getEmployeeCode() + " must name a same-branch department");
+        }
+        for (Appointment appointment : appointments.findAll()) {
+            assertNotNull(appointment.getBranch(), "seeded appointment must be branch-owned");
+            UUID branchId = appointment.getBranch().getId();
+            assertTrue(branchCodeById.containsKey(branchId), "appointment ownership must resolve to a demo branch");
+            Patient patient = patients.findById(UUID.fromString(appointment.getPatientId()))
+                    .orElseThrow(() -> new AssertionError("appointment patientId must resolve"));
+            StaffMember professional = staff.findById(UUID.fromString(appointment.getProfessionalId()))
+                    .orElseThrow(() -> new AssertionError("appointment professionalId must resolve"));
+            assertEquals(branchId, patient.getBranch().getId(), "appointment patient must be same-branch");
+            assertEquals(branchId, professional.getBranch().getId(), "appointment professional must be same-branch");
+            assertNotNull(appointment.getDurationMinutes(), "seeded appointments carry the bounded duration");
+            assertNotNull(appointment.getEndsAt(), "seeded appointments carry the computed window end");
+            assertDoesNotThrow(() -> LocalDateTime.parse(appointment.getScheduledAt()),
+                    "seeded scheduledAt must stay a parseable typed ISO value");
+        }
+        for (Bed bed : beds.findAll()) {
+            assertNotNull(bed.getBranch(), "seeded bed must be branch-owned");
+            assertTrue(branchCodeById.containsKey(bed.getBranch().getId()),
+                    "bed ownership must resolve to a demo branch");
+        }
+        for (Admission admission : admissions.findAll()) {
+            assertNotNull(admission.getBranchId(), "seeded admission must be branch-owned");
+            assertTrue(branchCodeById.containsKey(admission.getBranchId()),
+                    "admission ownership must resolve to a demo branch");
+            Patient patient = patients.findById(UUID.fromString(admission.getPatientId()))
+                    .orElseThrow(() -> new AssertionError("admission patientId must resolve"));
+            assertEquals(admission.getBranchId(), patient.getBranch().getId(),
+                    "admission patient must be same-branch");
+        }
+        for (EmergencyVisit visit : emergencyVisits.findAll()) {
+            assertNotNull(visit.getBranchId(), "seeded emergency visit must be branch-owned");
+            assertTrue(branchCodeById.containsKey(visit.getBranchId()),
+                    "emergency ownership must resolve to a demo branch");
+            Patient patient = patients.findById(UUID.fromString(visit.getPatientId()))
+                    .orElseThrow(() -> new AssertionError("emergency patientId must resolve"));
+            assertEquals(visit.getBranchId(), patient.getBranch().getId(),
+                    "emergency patient must be same-branch");
+        }
+        for (Invoice invoice : invoices.findAll()) {
+            assertNotNull(invoice.getBranchId(), "seeded invoice must be branch-owned");
+            assertTrue(branchCodeById.containsKey(invoice.getBranchId()),
+                    "invoice ownership must resolve to a demo branch");
+            Patient patient = patients.findById(UUID.fromString(invoice.getPatientId()))
+                    .orElseThrow(() -> new AssertionError("invoice patientId must resolve"));
+            assertEquals(invoice.getBranchId(), patient.getBranch().getId(),
+                    "invoice patient must be same-branch");
+        }
+        for (StaffAvailability interval : availability.findAll()) {
+            assertNotNull(interval.getBranchId(), "seeded availability must be branch-owned");
+            assertTrue(branchCodeById.containsKey(interval.getBranchId()),
+                    "availability ownership must resolve to a demo branch");
+            StaffMember member = staff.findById(interval.getStaffMemberId())
+                    .orElseThrow(() -> new AssertionError("availability staffMemberId must resolve"));
+            assertEquals(interval.getBranchId(), member.getBranch().getId(),
+                    "availability professional must be same-branch");
+            assertTrue(interval.getStartsAt().isBefore(interval.getEndsAt()),
+                    "availability intervals must be valid half-open [startsAt, endsAt) windows");
+        }
     }
 
     /**
-     * Plan 3 Task 4: every seeded workflow row — patients, professionals,
-     * and appointments — resolves to the stable {@code DEMO-BR-001} default
-     * branch at creation time, and repeated seeding keeps that binding
-     * without inflating rows, reassigning records, or touching unknown
-     * unassigned rows.
+     * Task 12 invariant: no bed/admission contradiction exists. A bed is
+     * OCCUPIED exactly when one live assignment row points at it; every live
+     * assignment binds an open (ADMITTED) same-branch admission; discharged
+     * admissions hold no bed; every non-occupied bed is free of assignments.
      */
     @Test
-    void demoWorkflowCohortIsAssignedToTheStableDefaultBranchIdempotently() {
-        Branch branch = branches.findByOrganizationIdAndCode(
-                organizations.findByCode(DEMO_ORG_CODE).orElseThrow().getId(), DEMO_BRANCH_CODE).orElseThrow();
+    void noBedAdmissionContradictionExists() {
+        Map<UUID, Admission> admissionById = admissions.findAll().stream()
+                .collect(Collectors.toMap(Admission::getId, a -> a));
+        List<AdmissionBedAssignment> liveAssignments = bedAssignments.findAll().stream().toList();
+        Map<UUID, List<AdmissionBedAssignment>> byBed = liveAssignments.stream()
+                .collect(Collectors.groupingBy(AdmissionBedAssignment::getBedId));
+        Map<UUID, List<AdmissionBedAssignment>> byAdmission = liveAssignments.stream()
+                .collect(Collectors.groupingBy(AdmissionBedAssignment::getAdmissionId));
 
-        List<Patient> cohort = demoPatients();
-        assertEquals(3, cohort.size(), "the demo patient cohort must be present");
-        assertTrue(cohort.stream().allMatch(p -> p.getBranch() != null
-                        && branch.getId().equals(p.getBranch().getId())),
-                "every seeded patient must be owned by the stable default branch");
-        assertTrue(demoStaff().stream().allMatch(s -> s.getBranch() != null
-                        && branch.getId().equals(s.getBranch().getId())),
-                "every seeded professional must be owned by the stable default branch");
-        assertTrue(appointments.findAll().stream().allMatch(a -> a.getBranch() != null
-                        && branch.getId().equals(a.getBranch().getId())),
-                "every seeded appointment must be owned by the stable default branch");
-
-        long patientsBefore = patients.count();
-        long staffBefore = staff.count();
-        long appointmentsBefore = appointments.count();
-        initializer.seedDemoCohort();
-        initializer.seedDemoCohort();
-
-        assertEquals(patientsBefore, patients.count(), "reruns must not inflate patients");
-        assertEquals(staffBefore, staff.count(), "reruns must not inflate professionals");
-        assertEquals(appointmentsBefore, appointments.count(), "reruns must not inflate appointments");
-        assertTrue(demoPatients().stream().allMatch(p -> p.getBranch() != null
-                        && branch.getId().equals(p.getBranch().getId())),
-                "the patient branch binding must stay stable across reruns");
-        assertTrue(demoStaff().stream().allMatch(s -> s.getBranch() != null
-                        && branch.getId().equals(s.getBranch().getId())),
-                "the professional branch binding must stay stable across reruns");
-        assertTrue(appointments.findAll().stream().allMatch(a -> a.getBranch() != null
-                        && branch.getId().equals(a.getBranch().getId())),
-                "the appointment branch binding must stay stable across reruns");
+        for (Bed bed : beds.findAll()) {
+            List<AdmissionBedAssignment> assignmentsForBed = byBed.getOrDefault(bed.getId(), List.of());
+            if (bed.isOccupied()) {
+                assertEquals(1, assignmentsForBed.size(),
+                        "an OCCUPIED bed must hold exactly one live assignment: " + bed.getBedNumber());
+                Admission admission = admissionById.get(assignmentsForBed.get(0).getAdmissionId());
+                assertNotNull(admission, "the live assignment must reference a seeded admission");
+                assertEquals(Admission.STATUS_ADMITTED, admission.getStatus(),
+                        "a bed-occupying admission must be open (ADMITTED)");
+                assertEquals(bed.getBranch().getId(), admission.getBranchId(),
+                        "the occupying admission must belong to the bed's branch");
+            } else {
+                assertTrue(assignmentsForBed.isEmpty(),
+                        "a non-occupied bed must hold no live assignment: " + bed.getBedNumber());
+            }
+        }
+        for (Admission admission : admissions.findAll()) {
+            if (Admission.STATUS_DISCHARGED.equals(admission.getStatus())) {
+                assertNotNull(admission.getDischargedAt(),
+                        "a DISCHARGED admission must carry its discharge timestamp");
+                assertFalse(byAdmission.containsKey(admission.getId()),
+                        "a discharged admission must hold no live bed assignment");
+            } else {
+                assertNull(admission.getDischargedAt(), "an open admission must have no discharge timestamp");
+                assertTrue(byAdmission.containsKey(admission.getId()),
+                        "every open seeded admission must occupy exactly one bed");
+                assertEquals(1, byAdmission.get(admission.getId()).size(),
+                        "an admission holds at most one live bed assignment");
+            }
+        }
+        assertEquals(2, liveAssignments.size(), "exactly the two open admissions occupy a bed each");
     }
+
+    // ------------------------------------------------------------------
+    // Status coverage and dated availability.
+    // ------------------------------------------------------------------
+
+    /**
+     * Task 12 composition: care-operation fixtures cover every lifecycle
+     * state across the branches — admissions in ADMITTED and DISCHARGED,
+     * emergency visits in WAITING, IN_TREATMENT, and CLOSED, and invoices in
+     * DRAFT, ISSUED, PAID, and VOID — with obviously synthetic labels and
+     * canonical display-only values.
+     */
+    @Test
+    void careOperationFixturesCoverEveryLifecycleStatusAcrossBranches() {
+        Map<String, List<Admission>> admissionsByStatus = admissions.findAll().stream()
+                .collect(Collectors.groupingBy(Admission::getStatus));
+        assertEquals(Set.of("ADMITTED", "DISCHARGED"), admissionsByStatus.keySet(),
+                "admission fixtures must cover exactly the open and discharged lifecycle states");
+        assertEquals(2, admissionsByStatus.get("ADMITTED").size(), "exactly two admissions must be ADMITTED");
+        assertEquals(2, admissionsByStatus.get("DISCHARGED").size(), "exactly two admissions must be DISCHARGED");
+        assertTrue(admissions.findAll().stream().allMatch(a -> a.getReason().startsWith("Demo ")),
+                "admission reasons must be obviously synthetic demo workflow labels");
+
+        Map<String, List<EmergencyVisit>> visitsByStatus = emergencyVisits.findAll().stream()
+                .collect(Collectors.groupingBy(EmergencyVisit::getStatus));
+        assertEquals(Set.of("WAITING", "IN_TREATMENT", "CLOSED"), visitsByStatus.keySet(),
+                "emergency fixtures must cover both active states and the closed terminal state");
+        assertEquals(2, visitsByStatus.get("WAITING").size(), "exactly two visits must be WAITING");
+        assertEquals(1, visitsByStatus.get("IN_TREATMENT").size(), "exactly one visit must be IN_TREATMENT");
+        assertEquals(2, visitsByStatus.get("CLOSED").size(), "exactly two visits must be CLOSED");
+        assertTrue(emergencyVisits.findAll().stream().allMatch(v -> DEMO_TRIAGE_LABELS.contains(v.getTriageLevel())),
+                "triage must stay the meaningless 1-5 demo label");
+        assertTrue(emergencyVisits.findAll().stream().allMatch(v -> v.getChiefComplaint().startsWith("Demo ")),
+                "emergency complaints must be obviously synthetic demo workflow labels");
+
+        Map<String, List<Invoice>> invoicesByStatus = invoices.findAll().stream()
+                .collect(Collectors.groupingBy(Invoice::getStatus));
+        assertEquals(Set.of("DRAFT", "ISSUED", "PAID", "VOID"), invoicesByStatus.keySet(),
+                "invoice fixtures must cover exactly the DRAFT, ISSUED, PAID, and VOID states");
+        assertEquals(2, invoicesByStatus.get("DRAFT").size(), "exactly two invoices must be DRAFT");
+        assertEquals(2, invoicesByStatus.get("ISSUED").size(), "exactly two invoices must be ISSUED");
+        assertEquals(2, invoicesByStatus.get("PAID").size(), "exactly two invoices must be PAID");
+        assertEquals(1, invoicesByStatus.get("VOID").size(), "exactly one invoice must be VOID");
+        assertTrue(invoices.findAll().stream().allMatch(i -> i.getInvoiceNumber().startsWith("DEMO-INV-")),
+                "invoice numbers must carry the obvious DEMO-INV- prefix");
+        assertEquals(TOTAL_INVOICES, invoices.findAll().stream().map(Invoice::getInvoiceNumber).distinct().count(),
+                "invoice numbers must stay unique stable keys");
+        assertTrue(invoices.findAll().stream().allMatch(i -> i.getAmount().matches("\\d+\\.\\d{2}")),
+                "invoice amounts must stay display-only simulation strings");
+        assertTrue(invoices.findAll().stream().allMatch(i -> i.getCurrency().equals("USD")),
+                "invoice currencies must stay display-only demo labels");
+    }
+
+    /**
+     * Task 12: beds exist in all four operational statuses across the
+     * branches, keyed by the stable (branch, ward, room, bedNumber) identity.
+     */
+    @Test
+    void bedsCoverAllOperationalStatusesAcrossBranches() {
+        Map<String, Long> byStatus = beds.findAll().stream()
+                .collect(Collectors.groupingBy(Bed::getOccupancyStatus, Collectors.counting()));
+        assertEquals(Set.of(Bed.STATUS_AVAILABLE, Bed.STATUS_OCCUPIED, Bed.STATUS_MAINTENANCE,
+                        Bed.STATUS_OUT_OF_SERVICE), byStatus.keySet(),
+                "bed fixtures must cover all four operational statuses");
+        assertEquals(4L, byStatus.get(Bed.STATUS_AVAILABLE), "four beds must be AVAILABLE");
+        assertEquals(2L, byStatus.get(Bed.STATUS_OCCUPIED), "two beds must be OCCUPIED");
+        assertEquals(1L, byStatus.get(Bed.STATUS_MAINTENANCE), "one bed must be in MAINTENANCE");
+        assertEquals(1L, byStatus.get(Bed.STATUS_OUT_OF_SERVICE), "one bed must be OUT_OF_SERVICE");
+        assertEquals(TOTAL_BEDS, beds.findAll().stream()
+                        .map(b -> b.getBranch().getId() + "/" + b.getWard() + "/" + b.getRoom() + "/" + b.getBedNumber())
+                        .distinct().count(),
+                "bed identities must stay unique per (branch, ward, room, bedNumber)");
+    }
+
+    /**
+     * Task 12: dated same-branch availability intervals exist for the
+     * professionals, they never overlap for the same professional, and every
+     * seeded appointment window is contained in one interval of its own
+     * professional in its own branch (the Task 9 contract the cohort must
+     * demonstrate).
+     */
+    @Test
+    void datedAvailabilityIsSameBranchConflictFreeAndCoversEveryAppointment() {
+        List<StaffAvailability> intervals = availability.findAll().stream().toList();
+        assertEquals(TOTAL_AVAILABILITY, intervals.size(), "exactly five dated intervals must be seeded");
+        for (StaffAvailability interval : intervals) {
+            StaffMember member = staff.findById(interval.getStaffMemberId())
+                    .orElseThrow(() -> new AssertionError("availability staff must resolve"));
+            assertEquals(interval.getBranchId(), member.getBranch().getId(),
+                    "availability must belong to the professional's branch");
+        }
+        Map<UUID, List<StaffAvailability>> byStaff = intervals.stream()
+                .collect(Collectors.groupingBy(StaffAvailability::getStaffMemberId));
+        for (List<StaffAvailability> sameStaff : byStaff.values()) {
+            for (int i = 0; i < sameStaff.size(); i++) {
+                for (int j = i + 1; j < sameStaff.size(); j++) {
+                    StaffAvailability a = sameStaff.get(i);
+                    StaffAvailability b = sameStaff.get(j);
+                    boolean overlaps = a.getStartsAt().isBefore(b.getEndsAt())
+                            && b.getStartsAt().isBefore(a.getEndsAt());
+                    assertFalse(overlaps, "seeded availability intervals must not overlap for one professional");
+                }
+            }
+        }
+        for (Appointment appointment : appointments.findAll()) {
+            LocalDateTime start = LocalDateTime.parse(appointment.getScheduledAt());
+            LocalDateTime end = LocalDateTime.parse(appointment.getEndsAt());
+            StaffMember professional = staff.findById(UUID.fromString(appointment.getProfessionalId()))
+                    .orElseThrow(() -> new AssertionError("appointment professional must resolve"));
+            boolean contained = byStaff.getOrDefault(professional.getId(), List.of()).stream()
+                    .filter(interval -> interval.getBranchId().equals(appointment.getBranch().getId()))
+                    .anyMatch(interval -> !interval.getStartsAt().isAfter(start)
+                            && !interval.getEndsAt().isBefore(end));
+            assertTrue(contained, "every seeded appointment must sit inside its professional's availability");
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Audit evidence: system actor, owning-branch context, exact ledger.
+    // ------------------------------------------------------------------
+
+    /**
+     * Task 12 audit contract: seeding records exactly one event per seeded
+     * action — a CREATE for every newly created row plus the two admission
+     * bed-assignment actions recorded with the AdmissionService UPDATE
+     * convention. Every event stays attributed to the {@code system} actor
+     * and is context-aware without fabrication: each event tied to a
+     * branch-owned resource carries exactly that owning branch's id as its
+     * only acting-context value (assignment, role, scope, organization, and
+     * department stay null because no acting assignment exists at startup
+     * and ownership is never guessed beyond the resource's own branch), and
+     * the organization's own event keeps the fully context-less legacy
+     * shape. No event ever carries a correlation id (no request boundary).
+     */
+    @Test
+    void seededActionsProduceContextAwareSystemActorAuditEvents() {
+        List<AuditEvent> events = auditEvents.findAll().stream().toList();
+        assertEquals(FULL_AUDIT_LEDGER_SIZE, events.size(),
+                "seeding must record exactly one audit event per seeded action "
+                        + "(52 row inserts plus 2 bed-assignment actions)");
+        assertTrue(events.stream().allMatch(e -> "system".equals(e.getActor())),
+                "startup seeding has no authenticated user, so every actor must be system");
+        assertEquals(52, events.stream().filter(e -> "CREATE".equals(e.getAction())).count(),
+                "every newly created row must produce exactly one CREATE event");
+        assertEquals(2, events.stream().filter(e -> "UPDATE".equals(e.getAction())).count(),
+                "exactly the two bed-assignment actions produce UPDATE events");
+        assertTrue(events.stream().allMatch(e -> e.getCorrelationId() == null),
+                "startup events have no request boundary, so no correlation id may appear");
+        assertTrue(events.stream().allMatch(e -> e.getAssignmentId() == null && e.getRole() == null
+                        && e.getScope() == null && e.getOrganizationId() == null && e.getDepartmentId() == null),
+                "startup events must never fabricate an assignment, role, scope, organization, or department");
+
+        // Context-awareness: every event tied to a branch-owned seeded row
+        // carries exactly the owning branch id; the organization event alone
+        // keeps the context-less legacy shape.
+        Map<String, List<AuditEvent>> byType = events.stream()
+                .collect(Collectors.groupingBy(AuditEvent::getResourceType));
+        assertEquals(Set.of("Patient", "StaffMember", "Appointment", "StaffAvailability", "Admission",
+                        "EmergencyVisit", "Invoice", "Bed", "HospitalOrganization", "Branch", "Department"),
+                byType.keySet(), "event resource types must follow the conventions the services use");
+        Set<UUID> branchIds = branches.findAll().stream().map(Branch::getId).collect(Collectors.toSet());
+        for (Map.Entry<String, List<AuditEvent>> entry : byType.entrySet()) {
+            String type = entry.getKey();
+            List<AuditEvent> typed = entry.getValue();
+            switch (type) {
+                case "HospitalOrganization" -> {
+                    assertEquals(1, typed.size());
+                    assertNull(typed.get(0).getBranchId(),
+                            "the organization row has no owning branch, so its event stays context-less");
+                }
+                case "Branch" -> {
+                    assertEquals(3, typed.size());
+                    assertTrue(typed.stream().allMatch(e -> e.getBranchId() != null
+                                    && branchIds.contains(e.getBranchId())
+                                    && e.getBranchId().toString().equals(e.getResourceId())),
+                            "a branch event attributes the event to the branch the row IS");
+                }
+                case "Department" -> {
+                    assertEquals(4, typed.size());
+                    assertBranchContextResolves(typed, branchIds, departments.findAll().stream()
+                            .filter(d -> d.getBranch() != null)
+                            .collect(Collectors.toMap(d -> d.getId().toString(), d -> d.getBranch().getId())));
+                }
+                case "Patient" -> {
+                    assertEquals(6, typed.size());
+                    assertBranchContextResolves(typed, branchIds, patients.findAll().stream()
+                            .collect(Collectors.toMap(p -> p.getId().toString(), p -> p.getBranch().getId())));
+                }
+                case "StaffMember" -> {
+                    assertEquals(5, typed.size());
+                    assertBranchContextResolves(typed, branchIds, demoStaff().stream()
+                            .collect(Collectors.toMap(s -> s.getId().toString(), s -> s.getBranch().getId())));
+                }
+                case "Appointment" -> {
+                    assertEquals(4, typed.size());
+                    assertBranchContextResolves(typed, branchIds, appointments.findAll().stream()
+                            .collect(Collectors.toMap(a -> a.getId().toString(), a -> a.getBranch().getId())));
+                }
+                case "StaffAvailability" -> {
+                    assertEquals(5, typed.size());
+                    assertBranchContextResolves(typed, branchIds, availability.findAll().stream()
+                            .collect(Collectors.toMap(a -> a.getId().toString(), StaffAvailability::getBranchId)));
+                }
+                case "Bed" -> {
+                    assertEquals(8, typed.size());
+                    assertBranchContextResolves(typed, branchIds, beds.findAll().stream()
+                            .collect(Collectors.toMap(b -> b.getId().toString(), b -> b.getBranch().getId())));
+                }
+                case "Admission" -> {
+                    assertEquals(6, typed.size(),
+                            "four admission inserts plus two bed-assignment UPDATE actions");
+                    assertBranchContextResolves(typed, branchIds, admissions.findAll().stream()
+                            .collect(Collectors.toMap(a -> a.getId().toString(), Admission::getBranchId)));
+                    assertEquals(2, typed.stream().filter(e -> "UPDATE".equals(e.getAction())
+                                    && e.getDetails().startsWith("bed: ")).count(),
+                            "assignment actions must follow the AdmissionService 'bed: <id>' convention");
+                }
+                case "EmergencyVisit" -> {
+                    assertEquals(5, typed.size());
+                    assertBranchContextResolves(typed, branchIds, emergencyVisits.findAll().stream()
+                            .collect(Collectors.toMap(v -> v.getId().toString(), EmergencyVisit::getBranchId)));
+                }
+                case "Invoice" -> {
+                    assertEquals(7, typed.size());
+                    assertBranchContextResolves(typed, branchIds, invoices.findAll().stream()
+                            .collect(Collectors.toMap(i -> i.getId().toString(), Invoice::getBranchId)));
+                }
+                default -> fail("unexpected resource type " + type);
+            }
+        }
+    }
+
+    private void assertBranchContextResolves(List<AuditEvent> events, Set<UUID> branchIds,
+                                             Map<String, UUID> owningBranchByResourceId) {
+        for (AuditEvent event : events) {
+            assertNotNull(event.getBranchId(), "the event must carry its owning branch context");
+            assertTrue(branchIds.contains(event.getBranchId()), "the branch context must resolve to a demo branch");
+            assertEquals(owningBranchByResourceId.get(event.getResourceId()), event.getBranchId(),
+                    "the event context must be exactly the owning branch of the resource it describes");
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Dashboard coverage through the typed Task 10 contracts.
+    // ------------------------------------------------------------------
+
+    /**
+     * Task 12 dashboard coverage: every demo branch summary counts its
+     * cohort slice exactly with nonzero core coverage, and the network
+     * summary of an organization-scoped ADMIN equals the exact per-branch
+     * sum with every status bucket populated. The acting contexts below are
+     * fabricated principal shapes only — pointing at real server-owned demo
+     * rows, exactly the values the JWT filter derives for such assignments.
+     */
+    @Test
+    void dashboardsCountTheCohortExactlyWithNonzeroCoveragePerBranch() {
+        HospitalOrganization organization = organizations.findByCode(DEMO_ORG_CODE).orElseThrow();
+        Map<String, Branch> branchByCode = branches.findAll().stream()
+                .collect(Collectors.toMap(Branch::getCode, b -> b));
+
+        DashboardDtos.BranchSummary main = branchSummary(branchByCode.get(DEMO_BRANCH_CODE));
+        assertEquals(3L, main.patients());
+        assertEquals(2L, main.appointments());
+        assertEquals(2L, main.admissions());
+        assertEquals(1L, main.openAdmissions(), "the DISCHARGED admission must be excluded");
+        assertEquals(3L, main.emergencyVisits());
+        assertEquals(2L, main.activeEmergencyVisits(), "WAITING + IN_TREATMENT only; CLOSED excluded");
+        assertEquals(4L, main.invoices());
+        assertEquals(1L, main.invoicesDraft());
+        assertEquals(1L, main.invoicesIssued());
+        assertEquals(1L, main.invoicesPaid());
+        assertEquals(1L, main.invoicesVoid());
+        assertEquals(1L, main.bedsAvailable());
+        assertEquals(1L, main.bedsOccupied());
+        assertEquals(1L, main.bedsMaintenance());
+        assertEquals(1L, main.bedsOutOfService());
+        assertEquals(0L, main.todayAppointments(),
+                "todayAppointments must stay honest: the demo fixtures are dated 2031, never the server's today");
+
+        DashboardDtos.BranchSummary north = branchSummary(branchByCode.get(DEMO_BRANCH_NORTH_CODE));
+        assertEquals(2L, north.patients());
+        assertEquals(1L, north.appointments());
+        assertEquals(1L, north.admissions());
+        assertEquals(1L, north.openAdmissions());
+        assertEquals(1L, north.emergencyVisits());
+        assertEquals(1L, north.activeEmergencyVisits());
+        assertEquals(2L, north.invoices());
+        assertEquals(1L, north.bedsAvailable());
+        assertEquals(1L, north.bedsOccupied());
+        assertEquals(0L, north.bedsMaintenance());
+        assertEquals(0L, north.bedsOutOfService());
+
+        DashboardDtos.BranchSummary harbor = branchSummary(branchByCode.get(DEMO_BRANCH_HARBOR_CODE));
+        assertEquals(1L, harbor.patients());
+        assertEquals(1L, harbor.appointments());
+        assertEquals(1L, harbor.admissions());
+        assertEquals(0L, harbor.openAdmissions(), "the harbor admission is discharged");
+        assertEquals(1L, harbor.emergencyVisits());
+        assertEquals(0L, harbor.activeEmergencyVisits(), "the harbor visit is CLOSED");
+        assertEquals(1L, harbor.invoices());
+        assertEquals(2L, harbor.bedsAvailable());
+        assertEquals(0L, harbor.bedsOccupied());
+
+        DashboardDtos.NetworkSummary network = networkSummary(organization.getId());
+        assertEquals(organization.getId(), network.organizationId());
+        assertEquals(3, network.branches().size(), "the network view must compare all three branches");
+        assertEquals(List.of(DEMO_BRANCH_CODE, DEMO_BRANCH_NORTH_CODE, DEMO_BRANCH_HARBOR_CODE),
+                network.branches().stream().map(DashboardDtos.BranchSummary::branchCode).toList(),
+                "branch summaries must appear in deterministic code order");
+        assertEquals(6L, network.patients());
+        assertEquals(4L, network.appointments());
+        assertEquals(4L, network.admissions());
+        assertEquals(2L, network.openAdmissions());
+        assertEquals(5L, network.emergencyVisits());
+        assertEquals(3L, network.activeEmergencyVisits());
+        assertEquals(7L, network.invoices());
+        assertEquals(2L, network.invoicesDraft());
+        assertEquals(2L, network.invoicesIssued());
+        assertEquals(2L, network.invoicesPaid());
+        assertEquals(1L, network.invoicesVoid());
+        assertEquals(4L, network.bedsAvailable());
+        assertEquals(2L, network.bedsOccupied());
+        assertEquals(1L, network.bedsMaintenance());
+        assertEquals(1L, network.bedsOutOfService());
+        assertEquals(0L, network.todayAppointments());
+        assertEquals(network.branches().stream().mapToLong(DashboardDtos.BranchSummary::patients).sum(),
+                network.patients(), "organization totals must equal the sum over the branch summaries");
+    }
+
+    private DashboardDtos.BranchSummary branchSummary(Branch branch) {
+        ActingContext actingContext = new ActingContext("system-dashboard-reader",
+                UUID.randomUUID(), Role.ADMIN, AssignmentScope.BRANCH,
+                branch.getOrganization().getId(), branch.getId(), null);
+        SecurityContextHolder.getContext().setAuthentication(
+                UsernamePasswordAuthenticationToken.authenticated(actingContext, null, List.of()));
+        try {
+            return dashboardService.branchSummary();
+        } finally {
+            SecurityContextHolder.clearContext();
+        }
+    }
+
+    private DashboardDtos.NetworkSummary networkSummary(UUID organizationId) {
+        ActingContext actingContext = new ActingContext("system-network-reader",
+                UUID.randomUUID(), Role.ADMIN, AssignmentScope.ORGANIZATION, organizationId, null, null);
+        SecurityContextHolder.getContext().setAuthentication(
+                UsernamePasswordAuthenticationToken.authenticated(actingContext, null, List.of()));
+        try {
+            return dashboardService.networkSummary();
+        } finally {
+            SecurityContextHolder.clearContext();
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Enabled acting assignments of the cohort (DevAdminInitializer).
+    // ------------------------------------------------------------------
+
+    /**
+     * Task 12: with the review-account bootstrap enabled, the cohort's
+     * acting assignments are enabled and deterministic — ADMIN at
+     * ORGANIZATION scope and doctor/nurse at BRANCH scope on the stable
+     * default branch (the first active branch in code order even with three
+     * branches present). Provisioning rides the ready event, so the demo
+     * hierarchy exists by the time these rows are created.
+     */
+    @Test
+    void cohortActingAssignmentsAreEnabledAndDeterministicallyBound() {
+        HospitalOrganization organization = organizations.findByCode(DEMO_ORG_CODE).orElseThrow();
+        Branch defaultBranch = branches.findByOrganizationIdAndCode(organization.getId(), DEMO_BRANCH_CODE)
+                .orElseThrow();
+
+        List<ActingAssignment> seeded = assignments.findAll().stream().toList();
+        assertEquals(3, seeded.size(), "admin, doctor, and nurse each hold exactly one bootstrap assignment");
+        assertTrue(seeded.stream().allMatch(ActingAssignment::isEnabled),
+                "every bootstrap assignment must be enabled");
+        assertTrue(seeded.stream().allMatch(a -> organization.getId().equals(a.getOrganization().getId())),
+                "every bootstrap assignment must belong to the demo organization");
+
+        ActingAssignment admin = seeded.stream()
+                .filter(a -> Role.ADMIN.equals(a.getRole())).findFirst().orElseThrow();
+        assertEquals(AssignmentScope.ORGANIZATION, admin.getScope());
+        assertNull(admin.getBranch(), "the ADMIN bootstrap assignment is organization-scoped with no branch");
+        assertNull(admin.getDepartment());
+
+        for (String username : List.of("doctor", "nurse")) {
+            ActingAssignment review = seeded.stream()
+                    .filter(a -> a.getAccount().getUsername().equals(username)).findFirst().orElseThrow();
+            assertEquals(AssignmentScope.BRANCH, review.getScope());
+            assertEquals(defaultBranch.getId(), review.getBranch().getId(),
+                    username + " must act on the deterministic first-by-code demo branch");
+            assertNull(review.getDepartment());
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Idempotency and the legacy seam.
+    // ------------------------------------------------------------------
 
     /**
      * Task 2 legacy seam: an unknown pre-existing null-branch department is
@@ -279,351 +852,77 @@ class DemoDataInitializerTest {
         Department reloaded = departments.findById(legacy.getId()).orElseThrow();
         assertEquals(legacyCode, reloaded.getCode(), "the unknown row must stay untouched by seeding");
         assertNull(reloaded.getBranch(), "the unknown row must remain unassigned after reruns");
-        assertEquals(2, departments.findAll().stream()
+        assertEquals(4, departments.findAll().stream()
                         .filter(department -> department.getBranch() != null).count(),
                 "reruns must not assign or create additional owned departments");
         assertEquals(1, organizations.count(), "reruns must not inflate organizations");
-        assertEquals(1, branches.count(), "reruns must not inflate branches");
-    }
-
-    /** Referential integrity: every appointment reference resolves to a seeded record. */
-    @Test
-    void everySeededAppointmentReferenceResolvesToASeededRecord() {
-        List<Appointment> demoAppointments = appointments.findAll().stream().toList();
-        assertFalse(demoAppointments.isEmpty(), "the enabled flag must have seeded appointments");
-        for (Appointment appointment : demoAppointments) {
-            UUID patientId = UUID.fromString(appointment.getPatientId());
-            Patient patient = patients.findById(patientId)
-                    .orElseThrow(() -> new AssertionError(
-                            "appointment patientId must resolve to a persisted patient: " + patientId));
-            assertTrue(patient.getMedicalRecordNumber().startsWith("DEMO-"),
-                    "the resolved patient must belong to the synthetic demo cohort");
-            assertEquals(patientId.toString(), appointment.getPatientId(),
-                    "the stored reference must be the canonical UUID string of the persisted patient");
-
-            UUID professionalId = UUID.fromString(appointment.getProfessionalId());
-            StaffMember professional = staff.findById(professionalId)
-                    .orElseThrow(() -> new AssertionError(
-                            "appointment professionalId must resolve to a persisted professional: " + professionalId));
-            assertTrue(professional.getEmployeeCode().startsWith("DEMO-STAFF-"),
-                    "the resolved professional must belong to the synthetic demo cohort");
-            assertEquals(professionalId.toString(), appointment.getProfessionalId(),
-                    "the stored reference must be the canonical UUID string of the persisted professional");
-
-            assertTrue(List.of("scheduled", "confirmed", "completed", "cancelled")
-                            .contains(appointment.getStatus()),
-                    "seeded appointment status must follow the lowercase contract");
-            assertDoesNotThrow(() -> LocalDateTime.parse(appointment.getScheduledAt()),
-                    "seeded scheduledAt must stay a parseable typed ISO value");
-        }
+        assertEquals(3, branches.count(), "reruns must not inflate branches");
     }
 
     /**
-     * Task 8 composition: the seeded care-operation fixtures follow the
-     * approved exact status distribution — one open ADMITTED admission, one
-     * DISCHARGED admission for the dashboard-exclusion proof, one WAITING and
-     * one IN_TREATMENT emergency visit (proving the active sum) plus one
-     * CLOSED visit, and exactly one invoice in each lifecycle status. No
-     * volume beyond the named rows.
+     * Task 12 idempotency: a second run inserts zero records and zero
+     * events across every seeded store, and the stable business keys stay
+     * unchanged.
      */
     @Test
-    void careOperationFixturesFollowTheApprovedComposition() {
-        List<Admission> seededAdmissions = admissions.findAll().stream().toList();
-        assertEquals(2, seededAdmissions.size(), "the demo cohort must contain exactly two synthetic admissions");
-        Map<String, List<Admission>> admissionsByStatus = seededAdmissions.stream()
-                .collect(Collectors.groupingBy(Admission::getStatus));
-        assertEquals(Set.of("ADMITTED", "DISCHARGED"), admissionsByStatus.keySet(),
-                "admission fixtures must cover exactly the open and discharged lifecycle states");
-        assertEquals(1, admissionsByStatus.get("ADMITTED").size(), "exactly one admission must be ADMITTED");
-        assertEquals(1, admissionsByStatus.get("DISCHARGED").size(), "exactly one admission must be DISCHARGED");
-        Admission openAdmission = admissionsByStatus.get("ADMITTED").get(0);
-        assertNull(openAdmission.getDischargedAt(), "the ADMITTED admission must be open (dischargedAt null)");
-        assertNotNull(admissionsByStatus.get("DISCHARGED").get(0).getDischargedAt(),
-                "the DISCHARGED admission must carry a discharge timestamp");
-        assertTrue(seededAdmissions.stream().allMatch(a -> a.getReason().startsWith("Demo ")),
-                "admission reasons must be obviously synthetic demo workflow labels");
+    void repeatedInitializationInsertsZeroRecordsAndZeroEvents() {
+        Map<String, Long> before = storeCounts();
+        assertEquals(Map.ofEntries(
+                        Map.entry("patients", TOTAL_PATIENTS),
+                        Map.entry("staff", TOTAL_STAFF),
+                        Map.entry("appointments", TOTAL_APPOINTMENTS),
+                        Map.entry("availability", TOTAL_AVAILABILITY),
+                        Map.entry("beds", TOTAL_BEDS),
+                        Map.entry("admissions", TOTAL_ADMISSIONS),
+                        Map.entry("bedAssignments", 2L),
+                        Map.entry("emergencyVisits", TOTAL_EMERGENCY_VISITS),
+                        Map.entry("invoices", TOTAL_INVOICES),
+                        Map.entry("organizations", 1L),
+                        Map.entry("branches", 3L),
+                        Map.entry("departments", 4L),
+                        Map.entry("auditEvents", FULL_AUDIT_LEDGER_SIZE)),
+                before, "the startup run must have produced the exact first-run composition");
 
-        List<EmergencyVisit> seededVisits = emergencyVisits.findAll().stream().toList();
-        assertEquals(3, seededVisits.size(), "the demo cohort must contain exactly three synthetic emergency visits");
-        Map<String, List<EmergencyVisit>> visitsByStatus = seededVisits.stream()
-                .collect(Collectors.groupingBy(EmergencyVisit::getStatus));
-        assertEquals(Set.of("WAITING", "IN_TREATMENT", "CLOSED"), visitsByStatus.keySet(),
-                "emergency fixtures must cover both active states and the closed terminal state");
-        assertEquals(1, visitsByStatus.get("WAITING").size(), "exactly one visit must be WAITING");
-        assertEquals(1, visitsByStatus.get("IN_TREATMENT").size(), "exactly one visit must be IN_TREATMENT");
-        assertEquals(1, visitsByStatus.get("CLOSED").size(), "exactly one visit must be CLOSED");
-        assertTrue(seededVisits.stream().allMatch(v -> DEMO_TRIAGE_LABELS.contains(v.getTriageLevel())),
-                "triage must stay the meaningless 1-5 demo label");
-        assertTrue(seededVisits.stream().allMatch(v -> v.getChiefComplaint().startsWith("Demo ")),
-                "emergency complaints must be obviously synthetic demo workflow labels");
-
-        List<Invoice> seededInvoices = invoices.findAll().stream().toList();
-        assertEquals(4, seededInvoices.size(), "the demo cohort must contain exactly four synthetic invoices");
-        Map<String, List<Invoice>> invoicesByStatus = seededInvoices.stream()
-                .collect(Collectors.groupingBy(Invoice::getStatus));
-        assertEquals(INVOICE_STATUSES, invoicesByStatus.keySet(),
-                "invoice fixtures must cover exactly the DRAFT, ISSUED, PAID, and VOID states");
-        for (String status : INVOICE_STATUSES) {
-            assertEquals(1, invoicesByStatus.get(status).size(),
-                    "exactly one invoice must exist in status " + status);
-        }
-        assertTrue(seededInvoices.stream().allMatch(i -> i.getInvoiceNumber().startsWith("DEMO-INV-")),
-                "invoice numbers must carry the obvious DEMO-INV- prefix");
-        assertEquals(4, seededInvoices.stream().map(Invoice::getInvoiceNumber).distinct().count(),
-                "invoice numbers must stay unique stable keys");
-        assertTrue(seededInvoices.stream().allMatch(i -> i.getAmount().matches("\\d+\\.\\d{2}")),
-                "invoice amounts must stay display-only simulation strings");
-        assertTrue(seededInvoices.stream().allMatch(i -> i.getCurrency().equals("USD")),
-                "invoice currencies must stay display-only demo labels");
-    }
-
-    /**
-     * Task 8 referential integrity: every care-operation row references an
-     * existing seeded DEMO patient by canonical UUID string and carries
-     * parseable typed ISO timestamps.
-     */
-    @Test
-    void careOperationReferencesResolveToExistingDemoPatients() {
-        List<Long> countedCareOperationRows = List.of(
-                admissions.count(), emergencyVisits.count(), invoices.count());
-        assertEquals(List.of(2L, 3L, 4L), countedCareOperationRows,
-                "the enabled flag must have seeded the care-operation fixtures");
-
-        for (Admission admission : admissions.findAll()) {
-            Patient patient = resolveDemoPatient(admission.getPatientId(), "admission");
-            assertEquals(patient.getId().toString(), admission.getPatientId(),
-                    "the stored admission reference must be the canonical UUID string of the persisted patient");
-            assertDoesNotThrow(() -> LocalDateTime.parse(admission.getAdmittedAt()),
-                    "seeded admittedAt must stay a parseable typed ISO value");
-            if (admission.getDischargedAt() != null) {
-                assertDoesNotThrow(() -> LocalDateTime.parse(admission.getDischargedAt()),
-                        "seeded dischargedAt must stay a parseable typed ISO value");
-            }
-        }
-        for (EmergencyVisit visit : emergencyVisits.findAll()) {
-            Patient patient = resolveDemoPatient(visit.getPatientId(), "emergency visit");
-            assertEquals(patient.getId().toString(), visit.getPatientId(),
-                    "the stored emergency reference must be the canonical UUID string of the persisted patient");
-            assertDoesNotThrow(() -> LocalDateTime.parse(visit.getArrivalAt()),
-                    "seeded arrivalAt must stay a parseable typed ISO value");
-        }
-        for (Invoice invoice : invoices.findAll()) {
-            Patient patient = resolveDemoPatient(invoice.getPatientId(), "invoice");
-            assertEquals(patient.getId().toString(), invoice.getPatientId(),
-                    "the stored invoice reference must be the canonical UUID string of the persisted patient");
-        }
-    }
-
-    /**
-     * Audit evidence: the startup seeding records exactly one CREATE event
-     * per newly created record (3 patients + 2 professionals + 2
-     * appointments + 2 admissions + 3 emergency visits + 4 invoices + the
-     * Task 2 hierarchy of 1 organization + 1 branch + 2 demo departments)
-     * under the same resource-type conventions the services use. No user is
-     * authenticated during startup, so {@link AuditService} attributes
-     * every event to the system actor. Reused hierarchy rows record
-     * nothing, which is what keeps reruns audit-idempotent.
-     */
-    @Test
-    void seededCreatesProduceSystemActorAuditEvents() {
-        List<AuditEvent> events = auditEvents.findAll().stream().toList();
-        assertEquals(FULL_AUDIT_LEDGER_SIZE, events.size(),
-                "seeding must record exactly one CREATE audit event per newly created record "
-                        + "(3 patients + 2 professionals + 2 appointments + 2 admissions + 3 emergency visits "
-                        + "+ 4 invoices + 1 organization + 1 branch + 2 departments)");
-        for (AuditEvent event : events) {
-            assertEquals("CREATE", event.getAction(), "seeded creations must be recorded as CREATE events");
-            assertEquals("system", event.getActor(),
-                    "startup seeding has no authenticated user, so the actor must be system");
-        }
-        Map<String, List<AuditEvent>> byType = events.stream()
-                .collect(Collectors.groupingBy(AuditEvent::getResourceType));
-        assertEquals(Set.of("Patient", "StaffMember", "Appointment", "Admission", "EmergencyVisit", "Invoice",
-                        "HospitalOrganization", "Branch", "Department"),
-                byType.keySet(), "event resource types must follow the conventions the services use");
-        assertEquals(3, byType.get("Patient").size(), "each newly created seeded patient must produce one CREATE event");
-        assertEquals(2, byType.get("StaffMember").size(), "each newly created seeded professional must produce one CREATE event");
-        assertEquals(2, byType.get("Appointment").size(), "each newly created seeded appointment must produce one CREATE event");
-        assertEquals(2, byType.get("Admission").size(), "each newly created seeded admission must produce one CREATE event");
-        assertEquals(3, byType.get("EmergencyVisit").size(), "each newly created seeded emergency visit must produce one CREATE event");
-        assertEquals(4, byType.get("Invoice").size(), "each newly created seeded invoice must produce one CREATE event");
-        assertEquals(1, byType.get("HospitalOrganization").size(), "the organization insert must produce one CREATE event");
-        assertEquals(1, byType.get("Branch").size(), "the default-branch insert must produce one CREATE event");
-        assertEquals(2, byType.get("Department").size(), "each demo department insert must produce one CREATE event");
-        assertEquals(DEMO_MRNS, byType.get("Patient").stream().map(AuditEvent::getDetails).collect(Collectors.toSet()),
-                "patient events must carry the MRN as details, matching the PatientService convention");
-        assertTrue(byType.get("StaffMember").stream().allMatch(e -> "created".equals(e.getDetails()))
-                        && byType.get("Appointment").stream().allMatch(e -> "created".equals(e.getDetails()))
-                        && byType.get("Admission").stream().allMatch(e -> "created".equals(e.getDetails()))
-                        && byType.get("EmergencyVisit").stream().allMatch(e -> "created".equals(e.getDetails()))
-                        && byType.get("Invoice").stream().allMatch(e -> "created".equals(e.getDetails()))
-                        && byType.get("HospitalOrganization").stream().allMatch(e -> "created".equals(e.getDetails()))
-                        && byType.get("Branch").stream().allMatch(e -> "created".equals(e.getDetails()))
-                        && byType.get("Department").stream().allMatch(e -> "created".equals(e.getDetails())),
-                "non-patient events must carry the non-sensitive 'created' detail");
-        assertEquals(demoPatients().stream().map(p -> p.getId().toString()).collect(Collectors.toSet()),
-                byType.get("Patient").stream().map(AuditEvent::getResourceId).collect(Collectors.toSet()),
-                "each patient event must reference the canonical id of the persisted record");
-        assertEquals(demoStaff().stream().map(s -> s.getId().toString()).collect(Collectors.toSet()),
-                byType.get("StaffMember").stream().map(AuditEvent::getResourceId).collect(Collectors.toSet()),
-                "each professional event must reference the canonical id of the persisted record");
-        assertEquals(appointments.findAll().stream().map(a -> a.getId().toString()).collect(Collectors.toSet()),
-                byType.get("Appointment").stream().map(AuditEvent::getResourceId).collect(Collectors.toSet()),
-                "each appointment event must reference the canonical id of the persisted record");
-        assertEquals(admissions.findAll().stream().map(a -> a.getId().toString()).collect(Collectors.toSet()),
-                byType.get("Admission").stream().map(AuditEvent::getResourceId).collect(Collectors.toSet()),
-                "each admission event must reference the canonical id of the persisted record");
-        assertEquals(emergencyVisits.findAll().stream().map(v -> v.getId().toString()).collect(Collectors.toSet()),
-                byType.get("EmergencyVisit").stream().map(AuditEvent::getResourceId).collect(Collectors.toSet()),
-                "each emergency visit event must reference the canonical id of the persisted record");
-        assertEquals(invoices.findAll().stream().map(i -> i.getId().toString()).collect(Collectors.toSet()),
-                byType.get("Invoice").stream().map(AuditEvent::getResourceId).collect(Collectors.toSet()),
-                "each invoice event must reference the canonical id of the persisted record");
-        assertEquals(organizations.findAll().stream().map(o -> o.getId().toString()).collect(Collectors.toSet()),
-                byType.get("HospitalOrganization").stream().map(AuditEvent::getResourceId).collect(Collectors.toSet()),
-                "the organization event must reference the canonical id of the persisted record");
-        assertEquals(branches.findAll().stream().map(b -> b.getId().toString()).collect(Collectors.toSet()),
-                byType.get("Branch").stream().map(AuditEvent::getResourceId).collect(Collectors.toSet()),
-                "the branch event must reference the canonical id of the persisted record");
-        assertEquals(departments.findAll().stream()
-                        .filter(d -> d.getBranch() != null)
-                        .map(d -> d.getId().toString()).collect(Collectors.toSet()),
-                byType.get("Department").stream().map(AuditEvent::getResourceId).collect(Collectors.toSet()),
-                "each department event must reference the canonical id of the persisted assigned record");
-    }
-
-    /**
-     * Task 8 dashboard evidence through the Task 10 typed contract: the real
-     * {@link DashboardService} branch summary of the stable demo branch is
-     * exact for the branch-bound cohort — exactly the three demo patients and
-     * two demo appointments — while every legacy null-branch care-operation
-     * fixture (admissions, emergency visits, invoices) stays honestly hidden
-     * and zero until Task 12 rebuilds the cohort on the branch-scoped
-     * contract. No record is seeded, moved, or mutated to revive the retired
-     * whole-table totals: the rows still exist, only the branch scope hides
-     * them, and this test proves both halves. The acting context below is a
-     * fabricated principal shape only — a branch-scoped context pointing at
-     * the real server-owned demo branch row, exactly the value the JWT filter
-     * derives for such an assignment — so the service resolves the branch
-     * from server state, never from test input.
-     */
-    @Test
-    void dashboardAggregatesReflectExactFixtureComposition() {
-        Branch branch = branches.findByOrganizationIdAndCode(
-                organizations.findByCode(DEMO_ORG_CODE).orElseThrow().getId(), DEMO_BRANCH_CODE).orElseThrow();
-        assertEquals(2, admissions.count(), "the legacy null-branch admission fixtures must still exist");
-        assertEquals(3, emergencyVisits.count(), "the legacy null-branch emergency fixtures must still exist");
-        assertEquals(4, invoices.count(), "the legacy null-branch invoice fixtures must still exist");
-
-        ActingContext actingContext = new ActingContext("system-dashboard-reader",
-                UUID.randomUUID(), Role.ADMIN, AssignmentScope.BRANCH,
-                branch.getOrganization().getId(), branch.getId(), null);
-        SecurityContextHolder.getContext().setAuthentication(
-                UsernamePasswordAuthenticationToken.authenticated(actingContext, null, List.of()));
-        DashboardDtos.BranchSummary summary;
-        try {
-            summary = dashboardService.branchSummary();
-        } finally {
-            SecurityContextHolder.clearContext();
-        }
-        assertEquals(branch.getId(), summary.branchId(),
-                "the typed summary must name the acting demo branch row the server owns");
-        assertEquals(DEMO_BRANCH_CODE, summary.branchCode(), "the typed summary must carry the stable demo branch code");
-        assertTrue(summary.branchName().startsWith("Demo "), "the branch name must be obviously synthetic");
-        assertEquals(3L, summary.patients(), "patients must count exactly the three branch-bound demo patients");
-        assertEquals(2L, summary.appointments(), "appointments must count exactly the two branch-bound demo appointments");
-        assertEquals(0L, summary.todayAppointments(),
-                "todayAppointments must stay honest: the demo fixtures are dated 2031, never the server's today");
-        assertEquals(0L, summary.admissions(),
-                "legacy null-branch admission rows must stay hidden from the branch scope until Task 12");
-        assertEquals(0L, summary.openAdmissions(),
-                "openAdmissions must stay zero while no admission is branch-owned yet");
-        assertEquals(0L, summary.emergencyVisits(),
-                "legacy null-branch emergency rows must stay hidden from the branch scope until Task 12");
-        assertEquals(0L, summary.activeEmergencyVisits(),
-                "activeEmergencyVisits must stay zero while no visit is branch-owned yet");
-        assertEquals(0L, summary.invoices(),
-                "legacy null-branch invoice rows must stay hidden from the branch scope until Task 12");
-        assertEquals(0L, summary.invoicesDraft(), "the DRAFT bucket must stay zero while the cohort is unowned");
-        assertEquals(0L, summary.invoicesIssued(), "the ISSUED bucket must stay zero while the cohort is unowned");
-        assertEquals(0L, summary.invoicesPaid(), "the PAID bucket must stay zero while the cohort is unowned");
-        assertEquals(0L, summary.invoicesVoid(), "the VOID bucket must stay zero while the cohort is unowned");
-        assertEquals(0L, summary.bedsAvailable(), "no beds are seeded, so the available bucket must stay zero");
-        assertEquals(0L, summary.bedsOccupied(), "no beds are seeded, so the occupied bucket must stay zero");
-        assertEquals(0L, summary.bedsMaintenance(), "no beds are seeded, so the maintenance bucket must stay zero");
-        assertEquals(0L, summary.bedsOutOfService(), "no beds are seeded, so the out-of-service bucket must stay zero");
-    }
-
-    /**
-     * Idempotency: a second run changes no counts, creates no duplicates,
-     * adds no audit events, and leaves the hierarchy business keys stable.
-     */
-    @Test
-    void repeatedInitializationIsIdempotentWithoutDuplicateInflation() {
-        long patientsBefore = patients.count();
-        long staffBefore = staff.count();
-        long appointmentsBefore = appointments.count();
-        long admissionsBefore = admissions.count();
-        long emergencyVisitsBefore = emergencyVisits.count();
-        long invoicesBefore = invoices.count();
-        long organizationsBefore = organizations.count();
-        long branchesBefore = branches.count();
-        long departmentsBefore = departments.count();
-        assertEquals(3, demoPatients().size());
-        assertEquals(2, demoStaff().size());
-        assertEquals(2, appointmentsBefore);
-        assertEquals(2, admissionsBefore);
-        assertEquals(3, emergencyVisitsBefore);
-        assertEquals(4, invoicesBefore);
-        assertEquals(1, organizationsBefore);
-        assertEquals(1, branchesBefore);
-        assertEquals(2, departments.findAll().stream()
-                        .filter(d -> d.getBranch() != null).count(),
-                "exactly the two demo departments are assigned regardless of preserved legacy rows");
-
-        long auditEventsBefore = auditEvents.count();
-        assertEquals(FULL_AUDIT_LEDGER_SIZE, auditEventsBefore,
-                "the startup run must have recorded exactly the twenty CREATE events");
         initializer.seedDemoCohort();
         initializer.seedDemoCohort();
 
-        assertEquals(auditEventsBefore, auditEvents.count(),
-                "a repeated seed must reuse existing records and add zero new audit events");
-        assertEquals(patientsBefore, patients.count(),
-                "a repeated seed must not create additional patients");
-        assertEquals(staffBefore, staff.count(),
-                "a repeated seed must not create additional professionals");
-        assertEquals(appointmentsBefore, appointments.count(),
-                "a repeated seed must not create additional appointments");
-        assertEquals(admissionsBefore, admissions.count(),
-                "a repeated seed must not create additional admissions");
-        assertEquals(emergencyVisitsBefore, emergencyVisits.count(),
-                "a repeated seed must not create additional emergency visits");
-        assertEquals(invoicesBefore, invoices.count(),
-                "a repeated seed must not create additional invoices");
-        assertEquals(organizationsBefore, organizations.count(),
-                "a repeated seed must not create additional organizations");
-        assertEquals(branchesBefore, branches.count(),
-                "a repeated seed must not create additional branches");
-        assertEquals(departmentsBefore, departments.count(),
-                "a repeated seed must not create additional departments");
-        assertEquals(DEMO_ORG_CODE, organizations.findAll().stream().findFirst().orElseThrow().getCode(),
-                "the organization business key must stay unchanged after a repeated seed");
-        assertEquals(DEMO_BRANCH_CODE, branches.findAll().stream().findFirst().orElseThrow().getCode(),
-                "the branch business key must stay unchanged after a repeated seed");
+        assertEquals(before, storeCounts(),
+                "a repeated seed must insert zero records and zero events everywhere");
+        assertEquals(DEMO_MRNS, demoPatients().stream()
+                        .map(Patient::getMedicalRecordNumber)
+                        .collect(Collectors.toSet()),
+                "the stable patient keys must stay unchanged after a repeated seed");
+        assertEquals(DEMO_STAFF_CODES, demoStaff().stream()
+                        .map(StaffMember::getEmployeeCode)
+                        .collect(Collectors.toSet()),
+                "the stable professional keys must stay unchanged after a repeated seed");
+        assertEquals(DEMO_BRANCH_CODES, branches.findAll().stream()
+                        .map(Branch::getCode).collect(Collectors.toSet()),
+                "the stable branch keys must stay unchanged after a repeated seed");
         assertEquals(DEMO_DEPARTMENT_CODES, departments.findAll().stream()
                         .filter(d -> d.getBranch() != null)
                         .map(Department::getCode).collect(Collectors.toSet()),
-                "the demo department keys must stay unchanged after a repeated seed");
-        assertEquals(DEMO_MRNS, demoPatients().stream()
-                .map(Patient::getMedicalRecordNumber)
-                .collect(Collectors.toSet()), "the stable demo keys must stay unchanged after a repeated seed");
-        assertEquals(DEMO_STAFF_CODES, demoStaff().stream()
-                .map(StaffMember::getEmployeeCode)
-                .collect(Collectors.toSet()), "the stable demo keys must stay unchanged after a repeated seed");
-        assertEquals(Set.of("DEMO-INV-0001", "DEMO-INV-0002", "DEMO-INV-0003", "DEMO-INV-0004"),
-                invoices.findAll().stream().map(Invoice::getInvoiceNumber).collect(Collectors.toSet()),
-                "the stable invoice numbers must stay unchanged after a repeated seed");
+                "the stable department keys must stay unchanged after a repeated seed");
+        assertEquals(4, invoices.findAll().stream().map(Invoice::getInvoiceNumber)
+                        .filter(n -> n.startsWith("DEMO-INV-01")).count(),
+                "the stable default-branch invoice numbers must stay unchanged after a repeated seed");
+    }
+
+    private Map<String, Long> storeCounts() {
+        return Map.ofEntries(
+                Map.entry("patients", patients.count()),
+                Map.entry("staff", staff.count()),
+                Map.entry("appointments", appointments.count()),
+                Map.entry("availability", availability.count()),
+                Map.entry("beds", beds.count()),
+                Map.entry("admissions", admissions.count()),
+                Map.entry("bedAssignments", bedAssignments.count()),
+                Map.entry("emergencyVisits", emergencyVisits.count()),
+                Map.entry("invoices", invoices.count()),
+                Map.entry("organizations", organizations.count()),
+                Map.entry("branches", branches.count()),
+                Map.entry("departments", departments.count()),
+                Map.entry("auditEvents", auditEvents.count()));
     }
 
     /**
@@ -635,10 +934,14 @@ class DemoDataInitializerTest {
     void initializerIsDisabledByDefaultAndNeverTouchesStores() {
         PatientRepository patientRepository = Mockito.mock(PatientRepository.class);
         StaffMemberRepository staffMemberRepository = Mockito.mock(StaffMemberRepository.class);
+        StaffAvailabilityRepository staffAvailabilityRepository = Mockito.mock(StaffAvailabilityRepository.class);
         AppointmentRepository appointmentRepository = Mockito.mock(AppointmentRepository.class);
         AdmissionRepository admissionRepository = Mockito.mock(AdmissionRepository.class);
+        AdmissionBedAssignmentRepository admissionBedAssignmentRepository =
+                Mockito.mock(AdmissionBedAssignmentRepository.class);
         EmergencyVisitRepository emergencyVisitRepository = Mockito.mock(EmergencyVisitRepository.class);
         InvoiceRepository invoiceRepository = Mockito.mock(InvoiceRepository.class);
+        BedRepository bedRepository = Mockito.mock(BedRepository.class);
         HospitalOrganizationRepository organizationRepository = Mockito.mock(HospitalOrganizationRepository.class);
         BranchRepository branchRepository = Mockito.mock(BranchRepository.class);
         DepartmentRepository departmentRepository = Mockito.mock(DepartmentRepository.class);
@@ -647,31 +950,58 @@ class DemoDataInitializerTest {
                 .withUserConfiguration(DemoDataInitializer.class)
                 .withBean("patientRepository", PatientRepository.class, () -> patientRepository)
                 .withBean("staffMemberRepository", StaffMemberRepository.class, () -> staffMemberRepository)
+                .withBean("staffAvailabilityRepository", StaffAvailabilityRepository.class,
+                        () -> staffAvailabilityRepository)
                 .withBean("appointmentRepository", AppointmentRepository.class, () -> appointmentRepository)
                 .withBean("admissionRepository", AdmissionRepository.class, () -> admissionRepository)
-                .withBean("emergencyVisitRepository", EmergencyVisitRepository.class, () -> emergencyVisitRepository)
+                .withBean("admissionBedAssignmentRepository", AdmissionBedAssignmentRepository.class,
+                        () -> admissionBedAssignmentRepository)
+                .withBean("emergencyVisitRepository", EmergencyVisitRepository.class,
+                        () -> emergencyVisitRepository)
                 .withBean("invoiceRepository", InvoiceRepository.class, () -> invoiceRepository)
-                .withBean("organizationRepository", HospitalOrganizationRepository.class, () -> organizationRepository)
+                .withBean("bedRepository", BedRepository.class, () -> bedRepository)
+                .withBean("organizationRepository", HospitalOrganizationRepository.class,
+                        () -> organizationRepository)
                 .withBean("branchRepository", BranchRepository.class, () -> branchRepository)
                 .withBean("departmentRepository", DepartmentRepository.class, () -> departmentRepository)
                 .withBean("auditService", AuditService.class, () -> auditService)
                 .run(context -> {
                     assertTrue(context.getBeansOfType(DemoDataInitializer.class).isEmpty(),
                             "the initializer bean must not exist when the demo flag is absent (default off)");
-                    Mockito.verifyNoInteractions(patientRepository, staffMemberRepository, appointmentRepository,
-                            admissionRepository, emergencyVisitRepository, invoiceRepository,
-                            organizationRepository, branchRepository, departmentRepository, auditService);
+                    Mockito.verifyNoInteractions(patientRepository, staffMemberRepository,
+                            staffAvailabilityRepository, appointmentRepository, admissionRepository,
+                            admissionBedAssignmentRepository, emergencyVisitRepository, invoiceRepository,
+                            bedRepository, organizationRepository, branchRepository, departmentRepository,
+                            auditService);
                 });
     }
 
-    private Patient resolveDemoPatient(String patientIdValue, String rowKind) {
-        UUID patientId = UUID.fromString(patientIdValue);
-        Patient patient = patients.findById(patientId)
-                .orElseThrow(() -> new AssertionError(
-                        rowKind + " patientId must resolve to a persisted patient: " + patientId));
-        assertTrue(patient.getMedicalRecordNumber().startsWith("DEMO-"),
-                "the resolved " + rowKind + " patient must belong to the synthetic demo cohort");
-        return patient;
+    // ------------------------------------------------------------------
+    // Helpers.
+    // ------------------------------------------------------------------
+
+    private Map<String, Long> patientsByBranch() {
+        Map<UUID, String> codeById = branches.findAll().stream()
+                .collect(Collectors.toMap(Branch::getId, Branch::getCode));
+        return patients.findAll().stream()
+                .filter(p -> p.getBranch() != null)
+                .collect(Collectors.groupingBy(p -> codeById.get(p.getBranch().getId()), Collectors.counting()));
+    }
+
+    private Map<String, Long> staffByBranch() {
+        Map<UUID, String> codeById = branches.findAll().stream()
+                .collect(Collectors.toMap(Branch::getId, Branch::getCode));
+        return demoStaff().stream()
+                .filter(s -> s.getBranch() != null)
+                .collect(Collectors.groupingBy(s -> codeById.get(s.getBranch().getId()), Collectors.counting()));
+    }
+
+    private Map<String, Long> bedsByBranch() {
+        Map<UUID, String> codeById = branches.findAll().stream()
+                .collect(Collectors.toMap(Branch::getId, Branch::getCode));
+        return beds.findAll().stream()
+                .filter(b -> b.getBranch() != null)
+                .collect(Collectors.groupingBy(b -> codeById.get(b.getBranch().getId()), Collectors.counting()));
     }
 
     private List<Patient> demoPatients() {
